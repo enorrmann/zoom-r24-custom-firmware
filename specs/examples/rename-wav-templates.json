@@ -1,0 +1,24 @@
+{
+  "_comment": "Rename the per-track WAV templates the recorder writes into a project. All replacements are byte-length-identical, which is mandatory: the format strings are referenced from literal pools and moving them would invalidate every pointer. The device matches on the .WAV extension, so file organisation and project loading are unaffected.",
+  "output_name": "R24SYS.BIN",
+  "patches": [
+    {
+      "_note": "STE-%03d.WAV  -> STE_%03d.WAV   (stereo track takes, 12 bytes)",
+      "offset": "0x5d0c",
+      "expected": "5354452d253033642e574156",
+      "replacement": "5354455f253033642e574156"
+    },
+    {
+      "_note": "MONO-%03d.WAV -> MONO_%03d.WAV  (mono track takes, 13 bytes)",
+      "offset": "0x5d1c",
+      "expected": "4d4f4e4f2d253033642e574156",
+      "replacement": "4d4f4e4f5f253033642e574156"
+    },
+    {
+      "_note": "MASTR%03d.WAV -> MAST_%03d.WAV  (master mix, 13 bytes)",
+      "offset": "0x5d2c",
+      "expected": "4d41535452253033642e574156",
+      "replacement": "4d4153545f253033642e574156"
+    }
+  ]
+}

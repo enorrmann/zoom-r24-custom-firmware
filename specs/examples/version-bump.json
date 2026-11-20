@@ -1,0 +1,7 @@
+{
+  "_comment": "Minimal example: bump the version the updater reports AND the string the LCD shows at boot. Both copies must be changed - the header field alone does not change the display.",
+  "output_name": "R24SYS.BIN",
+  "version": "1.99",
+  "ui_version": "1.99",
+  "patches": []
+}

@@ -1,0 +1,604 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#101114">
+  <title>Drumkit Editor</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #101114;
+      --panel: #181a1f;
+      --panel-2: #202229;
+      --line: #30333c;
+      --muted: #9297a4;
+      --text: #f2f3f5;
+      --accent: #c5f36b;
+      --accent-ink: #17200a;
+      --danger: #ff7777;
+      --radius: 12px;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-width: 320px;
+      background: var(--bg);
+      color: var(--text);
+      font: 14px/1.45 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    button, input, select { font: inherit; }
+    button, select { -webkit-tap-highlight-color: transparent; }
+    .app { max-width: 1440px; margin: 0 auto; padding: 28px clamp(16px, 3vw, 42px) 48px; }
+    .topbar { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding-bottom: 27px; border-bottom: 1px solid var(--line); }
+    .brand { display: flex; align-items: center; gap: 12px; font-size: 13px; font-weight: 800; letter-spacing: .13em; }
+    .brand-mark { display: grid; place-items: center; width: 34px; height: 34px; border: 1px solid var(--accent); border-radius: 9px; color: var(--accent); font-size: 12px; letter-spacing: 0; }
+    .top-meta { color: var(--muted); font-size: 11px; letter-spacing: .11em; text-transform: uppercase; }
+    .intro { display: flex; justify-content: space-between; align-items: end; gap: 24px; padding: 35px 0 27px; }
+    h1 { margin: 0 0 7px; font-size: clamp(27px, 4vw, 39px); line-height: 1.05; letter-spacing: -.045em; }
+    .subtitle { margin: 0; color: var(--muted); }
+    .profile-control { min-width: 215px; }
+    .field-label, .section-kicker { display: block; margin: 0 0 8px; color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .13em; text-transform: uppercase; }
+    select {
+      width: 100%; min-height: 42px; padding: 0 38px 0 13px; color: var(--text);
+      background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; outline: none;
+    }
+    select:focus { border-color: var(--accent); }
+    .workspace { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(300px, .75fr); gap: 18px; align-items: start; }
+    .panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+    .panel-head { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 17px 19px; border-bottom: 1px solid var(--line); }
+    .panel-title { margin: 0; font-size: 13px; font-weight: 750; letter-spacing: .025em; }
+    .panel-note { color: var(--muted); font-size: 11px; }
+    .slots { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; padding: 13px; }
+    .slot {
+      min-width: 0; padding: 12px; background: #1e2026; border: 1px solid #30333c; border-radius: 9px;
+      transition: border-color .15s, background .15s;
+    }
+    .slot.drag-over { background: #292f20; border-color: var(--accent); }
+    .slot-top { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 9px; }
+    .slot-id { display: inline-grid; place-items: center; width: 27px; height: 25px; border-radius: 6px; background: #30333b; color: var(--accent); font-size: 11px; font-weight: 800; font-variant-numeric: tabular-nums; }
+    .sample-target { color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+    .slot-name { min-height: 20px; margin: 0 0 9px; font-size: 12px; font-weight: 700; }
+    .slot-controls { display: grid; grid-template-columns: minmax(0, 1fr) 35px 35px; gap: 6px; }
+    .slot select { min-width: 0; min-height: 35px; padding: 0 27px 0 9px; font-size: 11px; }
+    .icon-button, .secondary-button, .primary-button {
+      display: inline-flex; justify-content: center; align-items: center; gap: 7px; border-radius: 7px; cursor: pointer;
+      transition: filter .15s, border-color .15s, background .15s;
+    }
+    .icon-button { width: 35px; height: 35px; padding: 0; color: var(--text); background: #30333b; border: 1px solid #3b3e48; font-size: 13px; }
+    .icon-button:disabled { opacity: .3; cursor: default; }
+    button:not(:disabled):hover { filter: brightness(1.13); }
+    .slot-file { margin-top: 7px; overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+    .empty-slots { color: var(--muted); }
+    .library-body { padding: 15px; }
+    .dropzone {
+      display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 140px; padding: 18px;
+      text-align: center; background: #202229; border: 1px dashed #555b68; border-radius: 9px; cursor: pointer;
+      transition: background .15s, border-color .15s;
+    }
+    .dropzone.drag-over { background: #292f20; border-color: var(--accent); }
+    .drop-symbol { display: grid; place-items: center; width: 34px; height: 34px; margin-bottom: 9px; color: var(--accent); border: 1px solid #52613b; border-radius: 9px; font-size: 19px; }
+    .drop-main { font-weight: 700; font-size: 12px; }
+    .drop-help { margin-top: 4px; color: var(--muted); font-size: 10px; }
+    .file-input { display: none; }
+    .library-heading { display: flex; justify-content: space-between; align-items: center; margin: 19px 0 9px; }
+    .library-count { color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+    .file-list { display: grid; gap: 7px; max-height: 500px; overflow: auto; }
+    .file-item { display: grid; grid-template-columns: minmax(0, 1fr) 34px 34px; align-items: center; gap: 6px; padding: 8px; background: #202229; border: 1px solid transparent; border-radius: 8px; cursor: grab; }
+    .file-item:active { cursor: grabbing; }
+    .file-item.dragging { opacity: .45; }
+    .file-info { min-width: 0; }
+    .file-name { overflow: hidden; font-size: 11px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+    .file-size { margin-top: 2px; color: var(--muted); font-size: 10px; }
+    .file-item .icon-button { width: 34px; height: 32px; }
+    .empty-library { padding: 17px 10px; color: var(--muted); text-align: center; font-size: 11px; border: 1px solid var(--line); border-radius: 8px; }
+    .export-panel { margin-top: 14px; padding: 16px; background: #202229; border: 1px solid var(--line); border-radius: 9px; }
+    .export-title { margin: 0 0 5px; font-size: 13px; font-weight: 750; }
+    .export-desc { margin: 0 0 14px; color: var(--muted); font-size: 11px; }
+    .primary-button { width: 100%; min-height: 43px; padding: 0 14px; color: var(--accent-ink); background: var(--accent); border: 1px solid var(--accent); font-size: 12px; font-weight: 850; letter-spacing: .02em; }
+    .primary-button:disabled { opacity: .4; cursor: default; }
+    .secondary-button { min-height: 32px; padding: 0 10px; color: var(--text); background: #30333b; border: 1px solid #414550; font-size: 10px; }
+    .status { min-height: 16px; margin-top: 10px; color: var(--muted); font-size: 10px; }
+    .status.error { color: var(--danger); }
+    .status.success { color: var(--accent); }
+    .export-foot { display: flex; justify-content: space-between; gap: 10px; margin-top: 11px; color: var(--muted); font-size: 10px; }
+    .mapping-note { display: flex; gap: 9px; align-items: start; margin-top: 14px; padding: 12px 14px; color: var(--muted); background: #181a1f; border: 1px solid var(--line); border-radius: 8px; font-size: 10px; }
+    .mapping-note strong { color: var(--text); }
+    .footer { margin-top: 22px; color: #707582; font-size: 10px; text-align: center; }
+    @media (max-width: 900px) { .workspace { grid-template-columns: 1fr; } .file-list { max-height: 320px; } }
+    @media (max-width: 560px) {
+      .app { padding-top: 17px; }
+      .topbar { padding-bottom: 18px; }
+      .top-meta { display: none; }
+      .intro { align-items: stretch; flex-direction: column; padding: 25px 0 20px; }
+      .profile-control { min-width: 0; }
+      .slots { grid-template-columns: 1fr; padding: 9px; }
+      .panel-head { padding: 14px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="app">
+    <header class="topbar">
+      <div class="brand"><span class="brand-mark">16</span><span>DRUMKIT EDITOR</span></div>
+      <div class="top-meta">16 slots · 10 sample maps · WAV</div>
+    </header>
+
+    <section class="intro">
+      <div>
+        <h1>Build your drumkit.</h1>
+        <p class="subtitle">Cargá sonidos, escuchalos y asigná uno a cada posición.</p>
+      </div>
+      <div class="profile-control">
+        <label class="field-label" for="kit-profile">Perfil de exportación</label>
+        <select id="kit-profile" aria-label="Perfil de exportación">
+          <option value="BASIC">BASIC</option>
+          <option value="STUDIO">STUDIO</option>
+          <option value="LIVE">LIVE</option>
+          <option value="ROCK">ROCK</option>
+          <option value="POP">POP</option>
+          <option value="FUNK">FUNK</option>
+          <option value="JAZZ">JAZZ</option>
+          <option value="ACOUSTIC">ACOUSTIC</option>
+          <option value="TECHNO">TECHNO</option>
+          <option value="URBAN">URBAN</option>
+        </select>
+        <label class="field-label" for="table-layout" style="margin-top:10px">Tabla de samples</label>
+        <select id="table-layout" aria-label="Tabla de samples">
+          <option value="factory">Fábrica (73, compartidos)</option>
+          <option value="k160">Reubicada (160, 16 por kit)</option>
+        </select>
+      </div>
+    </section>
+
+    <section class="workspace">
+      <section class="panel" aria-labelledby="slots-heading">
+        <div class="panel-head">
+          <div>
+            <h2 class="panel-title" id="slots-heading">Asignación de sonidos</h2>
+            <div class="panel-note">Arrastrá un archivo de la biblioteca hasta una posición.</div>
+          </div>
+          <span class="panel-note" id="assigned-count">0 / 16 asignados</span>
+        </div>
+        <div class="slots" id="slots-grid"></div>
+      </section>
+
+      <aside>
+        <section class="panel" aria-labelledby="library-heading">
+          <div class="panel-head">
+            <div>
+              <h2 class="panel-title" id="library-heading">Biblioteca WAV</h2>
+              <div class="panel-note">Los archivos quedan disponibles para varias posiciones.</div>
+            </div>
+          </div>
+          <div class="library-body">
+            <label class="dropzone" id="dropzone" for="wav-files" tabindex="0">
+              <span class="drop-symbol">+</span>
+              <span class="drop-main">Arrastrá WAVs acá o hacé clic para buscarlos</span>
+              <span class="drop-help">Se aceptan archivos .wav y .wave</span>
+            </label>
+            <input class="file-input" id="wav-files" type="file" accept=".wav,.wave,audio/wav,audio/x-wav" multiple>
+
+            <div class="library-heading">
+              <span class="section-kicker" style="margin:0">Archivos cargados</span>
+              <span class="library-count" id="library-count">0 archivos</span>
+            </div>
+            <div class="file-list" id="file-list">
+              <div class="empty-library">Todavía no cargaste archivos WAV.</div>
+            </div>
+
+            <div class="export-panel">
+              <h3 class="export-title">Exportar drumkit</h3>
+              <p class="export-desc">Genera un ZIP plano con los WAVs asignados del perfil seleccionado. Se permiten kits incompletos.</p>
+              <button class="primary-button" id="export-button" type="button">Exportar ZIP</button>
+              <div class="status" id="export-status" role="status" aria-live="polite"></div>
+              <div class="export-foot"><span id="export-profile">BASIC</span><span id="export-total">16 archivos WAV</span></div>
+            </div>
+          </div>
+        </section>
+        <div class="mapping-note"><span>i</span><span><strong>Cómo funciona:</strong> cada posición mantiene su sonido. El perfil elegido determina el número de sample de destino. El ZIP contiene los WAVs en la raíz, sin carpetas, y un <code>samples.txt</code> para <code>tools/patch_samples.py --repack</code>. Con la tabla reubicada (160) cada kit escribe sus propios samples y no pisa a los demás.</span></div>
+      </aside>
+    </section>
+    <footer class="footer">El procesamiento se realiza localmente en tu navegador. Los WAVs no se suben a ningún servidor.</footer>
+  </main>
+
+  <script>
+    (() => {
+      "use strict";
+
+      const PROFILES = {
+        BASIC:    [56, 70,  8, 10,  5, 55,  4,  6, 69, 35, 45, 26, 23, 15,  9, 12],
+        STUDIO:   [21, 19, 47, 50,  1, 57, 48, 49, 44, 35, 45, 26, 23, 15,  9, 12],
+        LIVE:     [13,  0, 34, 46,  1, 57, 29, 30, 28, 35, 45, 26, 23, 15,  9, 12],
+        ROCK:     [25, 14,  8, 10,  5, 55, 22, 36,  2, 35, 45, 26, 23, 15,  9, 12],
+        POP:      [20,  7, 38, 39,  1, 57, 16, 18, 11, 35, 45, 26, 23, 15,  9, 12],
+        FUNK:     [ 3, 37, 38, 39,  5, 55, 32, 33, 31, 35, 45, 26, 23, 15,  9, 12],
+        JAZZ:     [24, 27, 34, 46,  1, 57, 41, 42, 40, 35, 45, 26, 23, 15,  9, 12],
+        ACOUSTIC: [43, 17, 34, 46,  1, 57, 16, 18, 11, 35, 45, 26, 23, 15,  9, 12],
+        TECHNO:   [65, 68, 64, 66, 59, 72, 53, 54, 67, 35, 45, 26, 23, 15,  9, 12],
+        URBAN:    [60, 62, 58, 61, 59, 71, 51, 52, 63, 35, 45, 26, 23, 15,  9, 12]
+      };
+
+      const SLOT_NAMES = [
+        "Kick Drum", "Snare Drum", "Closed Hi-Hat", "Open Hi-Hat",
+        "Crash Cymbal", "Ride Cymbal", "Tom 1 (Hi Tom)", "Tom 2 (Mid Tom)",
+        "Tom 3 (Low Tom)", "Handclap / Rim", "Tambourine", "Cowbell",
+        "Clave", "Hi Conga", "Low Conga", "Percussion Mute"
+      ];
+
+      const slotsGrid = document.getElementById("slots-grid");
+      const fileList = document.getElementById("file-list");
+      const fileInput = document.getElementById("wav-files");
+      const dropzone = document.getElementById("dropzone");
+      const profileSelect = document.getElementById("kit-profile");
+      const layoutSelect = document.getElementById("table-layout");
+      // Fábrica: los ids de la tabla de 73 que usa cada kit (compartidos).
+      // Reubicada (tools/r24bank.py relocate --per-kit): kit k, slot s -> 16k+s.
+      const currentMap = () => {
+        if (layoutSelect.value !== "k160") return PROFILES[profileSelect.value];
+        const kit = Object.keys(PROFILES).indexOf(profileSelect.value);
+        return Array.from({ length: 16 }, (_, s) => 16 * kit + s);
+      };
+      const sampleName = n => layoutSelect.value === "k160"
+        ? `sample${String(n).padStart(3, "0")}.wav` : `sample${String(n).padStart(2, "0")}.wav`;
+      const exportButton = document.getElementById("export-button");
+      const statusEl = document.getElementById("export-status");
+      const library = new Map();
+      const assignments = Array(16).fill(null);
+      let nextFileId = 1;
+
+      const pad = value => String(value).padStart(2, "0");
+      const formatSize = bytes => {
+        if (bytes < 1024) return bytes + " B";
+        if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+        return (bytes / (1024 * 1024)).toFixed(2) + " MB";
+      };
+
+      function setStatus(message, type = "") {
+        statusEl.textContent = message;
+        statusEl.className = "status" + (type ? " " + type : "");
+      }
+
+      function renderSlots() {
+        const profile = profileSelect.value;
+        const map = currentMap();
+        slotsGrid.innerHTML = "";
+
+        SLOT_NAMES.forEach((name, index) => {
+          const assignedId = assignments[index];
+          const assignedFile = assignedId === null ? null : library.get(assignedId);
+          const card = document.createElement("article");
+          card.className = "slot";
+          card.dataset.slot = String(index);
+          card.innerHTML = `
+            <div class="slot-top">
+              <span class="slot-id">${pad(index)}</span>
+              <span class="sample-target">DESTINO · ${sampleName(map[index])}</span>
+            </div>
+            <h3 class="slot-name"></h3>
+            <div class="slot-controls">
+              <select aria-label="Archivo para ${name}" data-slot-select="${index}">
+                <option value="">Sin asignar</option>
+              </select>
+              <button class="icon-button" type="button" data-play-slot="${index}" aria-label="Escuchar ${name}" title="Escuchar" ${assignedFile ? "" : "disabled"}>▶</button>
+              <button class="icon-button" type="button" data-clear-slot="${index}" aria-label="Vaciar ${name}" title="Vaciar" ${assignedFile ? "" : "disabled"}>×</button>
+            </div>
+            <div class="slot-file" title=""></div>
+          `;
+          card.querySelector(".slot-name").textContent = name;
+          const select = card.querySelector("select");
+          for (const [id, item] of library) {
+            const option = document.createElement("option");
+            option.value = String(id);
+            option.textContent = item.file.name;
+            select.appendChild(option);
+          }
+          select.value = assignedFile ? String(assignedId) : "";
+          const fileLabel = card.querySelector(".slot-file");
+          fileLabel.textContent = assignedFile ? assignedFile.file.name : "Soltá un WAV acá para asignarlo";
+          fileLabel.title = fileLabel.textContent;
+
+          card.addEventListener("dragover", event => {
+            event.preventDefault();
+            card.classList.add("drag-over");
+          });
+          card.addEventListener("dragleave", event => {
+            if (!card.contains(event.relatedTarget)) card.classList.remove("drag-over");
+          });
+          card.addEventListener("drop", event => handleSlotDrop(event, index, card));
+          slotsGrid.appendChild(card);
+        });
+
+        slotsGrid.querySelectorAll("[data-slot-select]").forEach(select => {
+          select.addEventListener("change", () => {
+            const slot = Number(select.dataset.slotSelect);
+            assignments[slot] = select.value === "" ? null : Number(select.value);
+            renderSlots();
+            updateCounts();
+          });
+        });
+        slotsGrid.querySelectorAll("[data-play-slot]").forEach(button => {
+          button.addEventListener("click", () => playFile(assignments[Number(button.dataset.playSlot)]));
+        });
+        slotsGrid.querySelectorAll("[data-clear-slot]").forEach(button => {
+          button.addEventListener("click", () => {
+            assignments[Number(button.dataset.clearSlot)] = null;
+            renderSlots();
+            updateCounts();
+          });
+        });
+        updateCounts();
+      }
+
+      function renderLibrary() {
+        fileList.innerHTML = "";
+        if (library.size === 0) {
+          const empty = document.createElement("div");
+          empty.className = "empty-library";
+          empty.textContent = "Todavía no cargaste archivos WAV.";
+          fileList.appendChild(empty);
+        } else {
+          for (const [id, item] of library) {
+            const row = document.createElement("div");
+            row.className = "file-item";
+            row.draggable = true;
+            row.dataset.fileId = String(id);
+            row.innerHTML = `
+              <div class="file-info"><div class="file-name"></div><div class="file-size"></div></div>
+              <button class="icon-button" type="button" data-play-file="${id}" aria-label="Escuchar archivo" title="Escuchar">▶</button>
+              <button class="icon-button" type="button" data-remove-file="${id}" aria-label="Quitar archivo" title="Quitar">×</button>
+            `;
+            row.querySelector(".file-name").textContent = item.file.name;
+            row.querySelector(".file-size").textContent = formatSize(item.file.size);
+            row.addEventListener("dragstart", event => {
+              event.dataTransfer.setData("application/x-drumkit-file", String(id));
+              event.dataTransfer.setData("text/plain", String(id));
+              event.dataTransfer.effectAllowed = "copy";
+              row.classList.add("dragging");
+            });
+            row.addEventListener("dragend", () => row.classList.remove("dragging"));
+            row.querySelector("[data-play-file]").addEventListener("click", () => playFile(id));
+            row.querySelector("[data-remove-file]").addEventListener("click", () => removeFile(id));
+            fileList.appendChild(row);
+          }
+        }
+        document.getElementById("library-count").textContent = library.size + (library.size === 1 ? " archivo" : " archivos");
+      }
+
+      function updateCounts() {
+        const count = assignments.filter(id => id !== null && library.has(id)).length;
+        document.getElementById("assigned-count").textContent = `${count} / 16 asignados`;
+        document.getElementById("export-profile").textContent = profileSelect.value;
+        exportButton.disabled = count === 0;
+        document.getElementById("export-total").textContent = `${count} archivo${count === 1 ? "" : "s"} WAV`;
+      }
+
+      function addFiles(files, assignToSlot = null) {
+        let nextSlot = assignToSlot;
+        let added = 0;
+        for (const file of files) {
+          const lower = file.name.toLowerCase();
+          if (!(lower.endsWith(".wav") || lower.endsWith(".wave"))) {
+            setStatus(`Se omitió "${file.name}": el archivo no es WAV.`, "error");
+            continue;
+          }
+          const id = nextFileId++;
+          const url = URL.createObjectURL(file);
+          library.set(id, { file, url });
+          added++;
+          if (nextSlot !== null && nextSlot < 16) {
+            assignments[nextSlot] = id;
+            nextSlot++;
+          }
+        }
+        renderLibrary();
+        renderSlots();
+        if (added > 0) setStatus(`${added} archivo${added === 1 ? "" : "s"} WAV cargado${added === 1 ? "" : "s"}.`, "success");
+      }
+
+      function removeFile(id) {
+        const item = library.get(id);
+        if (!item) return;
+        URL.revokeObjectURL(item.url);
+        library.delete(id);
+        assignments.forEach((assigned, index) => {
+          if (assigned === id) assignments[index] = null;
+        });
+        renderLibrary();
+        renderSlots();
+        setStatus("Archivo quitado de la biblioteca y de sus posiciones asignadas.");
+      }
+
+      function playFile(id) {
+        const item = library.get(id);
+        if (!item) return;
+        const audio = new Audio(item.url);
+        audio.play().catch(() => setStatus("No se pudo reproducir el WAV en este navegador.", "error"));
+      }
+
+      function handleSlotDrop(event, slotIndex, card) {
+        event.preventDefault();
+        card.classList.remove("drag-over");
+        const internalId = event.dataTransfer.getData("application/x-drumkit-file") || event.dataTransfer.getData("text/plain");
+        if (internalId && library.has(Number(internalId))) {
+          assignments[slotIndex] = Number(internalId);
+          renderSlots();
+          updateCounts();
+          return;
+        }
+        if (event.dataTransfer.files && event.dataTransfer.files.length) {
+          addFiles(event.dataTransfer.files, slotIndex);
+        }
+      }
+
+      ["dragenter", "dragover"].forEach(type => dropzone.addEventListener(type, event => {
+        event.preventDefault();
+        dropzone.classList.add("drag-over");
+      }));
+      ["dragleave", "drop"].forEach(type => dropzone.addEventListener(type, event => {
+        event.preventDefault();
+        dropzone.classList.remove("drag-over");
+      }));
+      dropzone.addEventListener("drop", event => {
+        const files = Array.from(event.dataTransfer.files || []);
+        if (files.length) addFiles(files);
+      });
+      dropzone.addEventListener("keydown", event => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          fileInput.click();
+        }
+      });
+      fileInput.addEventListener("change", () => {
+        addFiles(Array.from(fileInput.files || []));
+        fileInput.value = "";
+      });
+      layoutSelect.addEventListener("change", () => {
+        renderSlots();
+        setStatus(layoutSelect.value === "k160"
+          ? "Tabla reubicada: cada kit tiene sus 16 samples propios (ids 16·kit … 16·kit+15)."
+          : "Tabla de fábrica: los kits comparten samples (ids 0…72).");
+      });
+      profileSelect.addEventListener("change", () => {
+        renderSlots();
+        setStatus(`Perfil ${profileSelect.value}: destinos de sample actualizados.`);
+      });
+
+      function crc32(bytes) {
+        let crc = 0xffffffff;
+        for (let i = 0; i < bytes.length; i++) {
+          crc = (crc >>> 8) ^ CRC_TABLE[(crc ^ bytes[i]) & 0xff];
+        }
+        return (crc ^ 0xffffffff) >>> 0;
+      }
+
+      const CRC_TABLE = (() => {
+        const table = new Uint32Array(256);
+        for (let n = 0; n < 256; n++) {
+          let c = n;
+          for (let k = 0; k < 8; k++) c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+          table[n] = c >>> 0;
+        }
+        return table;
+      })();
+
+      function makeZip(entries) {
+        const encoder = new TextEncoder();
+        const localParts = [];
+        const centralParts = [];
+        let localOffset = 0;
+        let centralSize = 0;
+
+        for (const entry of entries) {
+          const nameBytes = encoder.encode(entry.name);
+          const data = entry.data;
+          const crc = crc32(new Uint8Array(data));
+
+          const local = new Uint8Array(30 + nameBytes.length);
+          const lv = new DataView(local.buffer);
+          lv.setUint32(0, 0x04034b50, true);
+          lv.setUint16(4, 20, true);
+          lv.setUint16(6, 0x0800, true);
+          lv.setUint16(8, 0, true);
+          lv.setUint16(10, 0, true);
+          lv.setUint16(12, 0x0021, true);
+          lv.setUint32(14, crc, true);
+          lv.setUint32(18, data.byteLength, true);
+          lv.setUint32(22, data.byteLength, true);
+          lv.setUint16(26, nameBytes.length, true);
+          lv.setUint16(28, 0, true);
+          local.set(nameBytes, 30);
+          localParts.push(local, data);
+
+          const central = new Uint8Array(46 + nameBytes.length);
+          const cv = new DataView(central.buffer);
+          cv.setUint32(0, 0x02014b50, true);
+          cv.setUint16(4, 20, true);
+          cv.setUint16(6, 20, true);
+          cv.setUint16(8, 0x0800, true);
+          cv.setUint16(10, 0, true);
+          cv.setUint16(12, 0, true);
+          cv.setUint16(14, 0x0021, true);
+          cv.setUint32(16, crc, true);
+          cv.setUint32(20, data.byteLength, true);
+          cv.setUint32(24, data.byteLength, true);
+          cv.setUint16(28, nameBytes.length, true);
+          cv.setUint16(30, 0, true);
+          cv.setUint16(32, 0, true);
+          cv.setUint16(34, 0, true);
+          cv.setUint16(36, 0, true);
+          cv.setUint32(38, 0, true);
+          cv.setUint32(42, localOffset, true);
+          central.set(nameBytes, 46);
+          centralParts.push(central);
+
+          localOffset += local.length + data.byteLength;
+          centralSize += central.length;
+        }
+
+        const end = new Uint8Array(22);
+        const ev = new DataView(end.buffer);
+        ev.setUint32(0, 0x06054b50, true);
+        ev.setUint16(4, 0, true);
+        ev.setUint16(6, 0, true);
+        ev.setUint16(8, entries.length, true);
+        ev.setUint16(10, entries.length, true);
+        ev.setUint32(12, centralSize, true);
+        ev.setUint32(16, localOffset, true);
+        ev.setUint16(20, 0, true);
+        return new Blob([...localParts, ...centralParts, end], { type: "application/zip" });
+      }
+
+      async function exportKit() {
+        const profile = profileSelect.value;
+        const map = currentMap();
+        const selected = assignments
+          .map((id, index) => ({ id, index }))
+          .filter(item => item.id !== null && library.has(item.id));
+        if (selected.length === 0) {
+          setStatus("Asigná al menos un WAV antes de exportar.", "error");
+          return;
+        }
+        const filenames = selected.map(item => sampleName(map[item.index]));
+        if (new Set(filenames).size !== filenames.length) {
+          setStatus("El perfil contiene números de sample repetidos entre los slots asignados; no se puede crear un ZIP plano sin sobrescribir archivos.", "error");
+          return;
+        }
+
+        exportButton.disabled = true;
+        exportButton.textContent = "Preparando ZIP…";
+        setStatus(`Leyendo ${selected.length} archivo${selected.length === 1 ? "" : "s"} WAV…`);
+        try {
+          const entries = await Promise.all(selected.map(async (item, outputIndex) => ({
+            name: filenames[outputIndex],
+            data: await library.get(item.id).file.arrayBuffer()
+          })));
+          // Lista lista para tools/patch_samples.py (rutas relativas a la lista).
+          const list = selected.map((item, i) => `${filenames[i]} ${map[item.index]}`).join("\n") + "\n";
+          entries.push({ name: "samples.txt", data: new TextEncoder().encode(list).buffer });
+          const blob = makeZip(entries);
+          const url = URL.createObjectURL(blob);
+          const link = document.createElement("a");
+          link.href = url;
+          link.download = `drumkit-${profile.toLowerCase()}.zip`;
+          document.body.appendChild(link);
+          link.click();
+          link.remove();
+          setTimeout(() => URL.revokeObjectURL(url), 30000);
+          setStatus(`ZIP generado: ${entries.length} WAVs, sin carpetas.`, "success");
+        } catch (error) {
+          console.error(error);
+          setStatus("No se pudo generar el ZIP. Revisá que los archivos sigan disponibles.", "error");
+        } finally {
+          exportButton.textContent = "Exportar ZIP";
+          updateCounts();
+        }
+      }
+
+      exportButton.addEventListener("click", exportKit);
+      renderLibrary();
+      renderSlots();
+    })();
+  </script>
+</body>
+</html>

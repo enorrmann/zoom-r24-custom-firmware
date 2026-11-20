@@ -1,0 +1,582 @@
+#!/usr/bin/env python3
+"""r24tool — build, verify, analyze and customise Zoom R24 firmware images.
+
+    ./r24tool info    R24SYS.BIN
+    ./r24tool verify  R24SYS.BIN
+    ./r24tool unpack  R24SYS.BIN -o work/
+    ./r24tool pack    work/ -o R24SYS.BIN
+    ./r24tool analyze R24SYS.BIN
+    ./r24tool patch   R24SYS.BIN -o out.bin --set-version 1.99
+    ./r24tool build   specs/examples/full-demo.json -o build/
+
+Run `./r24tool <cmd> --help` for per-command help.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import struct
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import r24image
+from r24image import R24Image, ImageError, HEADER_SIZE, LOAD_ADDR
+import r24analyze
+
+
+def _die(msg: str) -> "None":
+    print(f"error: {msg}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def _load(path: str) -> R24Image:
+    try:
+        return R24Image.from_file(path)
+    except OSError as exc:
+        _die(f"cannot read {path}: {exc}")
+    except ImageError as exc:
+        _die(f"{path}: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# info
+# ---------------------------------------------------------------------------
+def cmd_info(args) -> int:
+    img = _load(args.image)
+    print(f"file        : {args.image}")
+    print(f"size        : {img.size} bytes ({img.size / 1048576:.3f} MiB)")
+    print(f"magic       : {img.magic.decode('ascii', 'replace')}")
+    print(f"version     : {img.version} (header) / {img.ui_version} (UI string)")
+    print(f"payload     : {len(img.payload)} bytes, linked at VA {LOAD_ADDR:#010x}")
+    print(f"checksum    : stored {img.stored_checksum:#010x} / "
+          f"computed {img.computed_checksum:#010x} "
+          f"({'OK' if img.checksum_ok() else 'MISMATCH'})")
+    print(f"sha256      : {hashlib.sha256(img.data).hexdigest()}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# verify
+# ---------------------------------------------------------------------------
+def cmd_verify(args) -> int:
+    img = _load(args.image)
+    try:
+        report = img.verify()
+    except ImageError as exc:
+        _die(str(exc))
+    print("verification passed")
+    for key, val in report.items():
+        print(f"  {key:14s}: {val}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# unpack / pack
+# ---------------------------------------------------------------------------
+def cmd_unpack(args) -> int:
+    img = _load(args.image)
+    out = args.output
+    os.makedirs(out, exist_ok=True)
+    with open(os.path.join(out, "header.bin"), "wb") as fh:
+        fh.write(img.header)
+    with open(os.path.join(out, "payload.bin"), "wb") as fh:
+        fh.write(img.payload)
+    manifest = {
+        "source": os.path.basename(args.image),
+        "source_sha256": hashlib.sha256(img.data).hexdigest(),
+        "source_size": img.size,
+        "format": "zoom-r24-flat",
+        "header": "header.bin",
+        "header_size": HEADER_SIZE,
+        "payload": "payload.bin",
+        "payload_size": len(img.payload),
+        "load_addr": f"{LOAD_ADDR:#010x}",
+        "magic": img.magic.decode("ascii", "replace"),
+        "version": img.version,
+        "checksum": f"{img.stored_checksum:#010x}",
+    }
+    with open(os.path.join(out, "manifest.json"), "w") as fh:
+        json.dump(manifest, fh, indent=2)
+        fh.write("\n")
+    print(f"unpacked {args.image} -> {out}/")
+    print(f"  header.bin   {HEADER_SIZE} bytes")
+    print(f"  payload.bin  {len(img.payload)} bytes")
+    print(f"  manifest.json")
+    return 0
+
+
+def cmd_pack(args) -> int:
+    src = args.source
+    try:
+        with open(os.path.join(src, "header.bin"), "rb") as fh:
+            header = fh.read()
+        with open(os.path.join(src, "payload.bin"), "rb") as fh:
+            payload = fh.read()
+    except OSError as exc:
+        _die(f"cannot read payload/header from {src}: {exc}")
+    try:
+        img = R24Image.from_parts(header, payload, fix_checksum=not args.no_checksum)
+        img.verify()
+    except ImageError as exc:
+        _die(str(exc))
+    img.write(args.output)
+    print(f"packed {src}/ -> {args.output}")
+    print(f"  size     {img.size} bytes")
+    print(f"  version  {img.version} (header) / {img.ui_version} (UI)")
+    print(f"  checksum {img.stored_checksum:#010x}")
+    print(f"  sha256   {hashlib.sha256(img.data).hexdigest()}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# analyze
+# ---------------------------------------------------------------------------
+def cmd_analyze(args) -> int:
+    img = _load(args.image)
+    r24analyze.full_report(img, verbose=args.verbose)
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# patch
+# ---------------------------------------------------------------------------
+def cmd_patch(args) -> int:
+    img = _load(args.image)
+    changed = False
+    if args.set_version:
+        old_h, old_u = img.version, img.ui_version
+        img.set_version(args.set_version)
+        img.set_ui_version(args.set_version)
+        print(f"version header: {old_h!r} -> {args.set_version!r}")
+        print(f"version UI    : {old_u!r} -> {args.set_version!r}")
+        changed = True
+    for spec in args.patch or []:
+        # --patch OFFSET:HEXEXPECTED:HEXREPLACEMENT
+        try:
+            off_s, exp_s, rep_s = spec.split(":")
+            offset = int(off_s, 0)
+            expected = bytes.fromhex(exp_s)
+            replacement = bytes.fromhex(rep_s)
+        except ValueError:
+            _die(f"bad --patch spec {spec!r}; want OFFSET:HEXOLD:HEXNEW")
+        try:
+            img.patch(offset, expected, replacement)
+        except ImageError as exc:
+            _die(str(exc))
+        print(f"patched {offset:#08x}: {expected.hex()} -> {replacement.hex()}")
+        changed = True
+    if not changed:
+        _die("nothing to do: pass --set-version and/or --patch")
+    img.refresh_checksum()
+    try:
+        img.verify()
+    except ImageError as exc:
+        _die(f"post-patch verification failed: {exc}")
+    img.write(args.output)
+    print(f"wrote {args.output} ({img.size} bytes, checksum {img.stored_checksum:#010x})")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# build  (declarative spec -> customised image)
+# ---------------------------------------------------------------------------
+def cmd_build(args) -> int:
+    with open(args.spec) as fh:
+        spec = json.load(fh)
+    src = spec.get("source", args.source)
+    img = _load(src)
+
+    log = []
+
+    ver = spec.get("version")
+    if ver:
+        old = img.version
+        img.set_version(ver)
+        log.append(f"version header: {old!r} -> {ver!r}")
+    ui_ver = spec.get("ui_version")
+    if ui_ver:
+        old = img.ui_version
+        img.set_ui_version(ui_ver)
+        log.append(f"version UI    : {old!r} -> {ui_ver!r}")
+
+    for i, p in enumerate(spec.get("patches", [])):
+        expected = bytes.fromhex(p["expected"])
+        replacement = bytes.fromhex(p["replacement"])
+        if "find" in p:
+            # locate `expected` in the payload instead of a fixed offset;
+            # refuse ambiguous matches unless the caller pinned an occurrence.
+            hay = img.payload
+            needle = expected
+            hits = []
+            start = 0
+            while True:
+                k = hay.find(needle, start)
+                if k < 0:
+                    break
+                hits.append(k + HEADER_SIZE)
+                start = k + 1
+            occurrence = p.get("occurrence", 0)
+            if not hits:
+                _die(f"patch #{i}: pattern not found in image")
+            if len(hits) > 1 and "occurrence" not in p:
+                _die(f"patch #{i}: pattern occurs {len(hits)} times "
+                     f"({', '.join(hex(h) for h in hits[:5])}); "
+                     f"set \"occurrence\" or a fixed \"offset\"")
+            offset = hits[occurrence]
+        elif "offset" in p:
+            offset = int(p["offset"], 0) if isinstance(p["offset"], str) else p["offset"]
+        else:
+            _die(f"patch #{i}: needs either \"offset\" or \"find\"")
+        img.patch(offset, expected, replacement)
+        log.append(f"patch {i:<7d}: {offset:#08x} {expected.hex()} -> {replacement.hex()}")
+
+    # Any payload mutation invalidates the header checksum, which covers the
+    # payload byte sum. Recompute it before verifying.
+    img.refresh_checksum()
+
+    try:
+        report = img.verify()
+    except ImageError as exc:
+        _die(f"post-build verification failed: {exc}")
+
+    outdir = args.output
+    os.makedirs(outdir, exist_ok=True)
+    base = spec.get("output_name", "R24SYS.BIN")
+    outpath = os.path.join(outdir, base)
+    img.write(outpath)
+
+    def _rel(p):
+        try:
+            return os.path.relpath(p)
+        except ValueError:
+            return p
+
+    with open(src, "rb") as fh:
+        src_hash = hashlib.sha256(fh.read()).hexdigest()
+    buildinfo = {
+        "spec": _rel(args.spec),
+        "source": _rel(src),
+        "source_sha256": src_hash,
+        "output": _rel(outpath),
+        "output_sha256": report["sha256"],
+        "output_size": img.size,
+        "version": img.version,
+        "ui_version": img.ui_version,
+        "checksum": report["checksum"],
+        "changes": log,
+    }
+    with open(os.path.join(outdir, "build.json"), "w") as fh:
+        json.dump(buildinfo, fh, indent=2)
+        fh.write("\n")
+
+    print(f"spec         : {args.spec}")
+    print(f"source       : {src}")
+    for line in log:
+        print(f"  {line}" if not line.startswith(("version", "patch")) else f"{line}")
+    print(f"output       : {outpath}")
+    print(f"  size       : {img.size} bytes")
+    print(f"  version    : {img.version} (header) / {img.ui_version} (UI)")
+    print(f"  checksum   : {img.stored_checksum:#010x} (verified)")
+    print(f"  sha256     : {report['sha256']}")
+    print("\nInstall with the stock procedure: copy to the SD card root as")
+    print("R24SYS.BIN and follow the R24 Firmware Update Guide.")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# disasm / asm  (assembly-level work)
+# ---------------------------------------------------------------------------
+def _load_fnmap(path: str) -> dict:
+    """addr -> {thumb, size, name} from a Ghidra functions.csv."""
+    out = {}
+    if not path or not os.path.exists(path):
+        return out
+    with open(path) as fh:
+        next(fh, None)
+        for line in fh:
+            p = line.strip().split(",")
+            if len(p) < 4:
+                continue
+            out[int(p[0], 16)] = {"thumb": p[1] == "1", "size": int(p[2]), "name": p[3]}
+    return out
+
+
+def cmd_disasm(args) -> int:
+    import r24patch
+    img = _load(args.image)
+    fm = _load_fnmap(args.fnmap)
+    if args.address is None:
+        # whole-image function listing from the map
+        if not fm:
+            _die("no --fnmap given and no address: nothing to list")
+        for va in sorted(fm):
+            f = fm[va]
+            print(f"{va:#010x}  {'thumb' if f['thumb'] else 'arm  '}  "
+                  f"{f['size']:6d}  {f['name']}")
+        return 0
+    va = int(args.address, 0)
+    info = fm.get(va)
+    if info is None:
+        if args.size is None:
+            _die(f"{va:#x} is not in the function map; pass --size and --arm/--thumb")
+        info = {"thumb": args.thumb, "size": args.size, "name": f"FUN_{va:08x}"}
+    text = r24patch.disassemble_function(img, va, info["size"], info["thumb"])
+    if args.output:
+        with open(args.output, "w") as fh:
+            fh.write(text)
+        print(f"wrote {args.output} ({info['size']} bytes, "
+              f"{'thumb' if info['thumb'] else 'arm'})")
+    else:
+        sys.stdout.write(text)
+    return 0
+
+
+def cmd_asm(args) -> int:
+    import r24patch
+    img = _load(args.image)
+    fm = _load_fnmap(args.fnmap)
+    va = int(args.address, 0)
+    info = fm.get(va)
+    if info is None:
+        if args.size is None:
+            _die(f"{va:#x} is not in the function map; pass --size")
+        info = {"thumb": args.thumb, "size": args.size}
+    with open(args.source) as fh:
+        src = fh.read()
+    try:
+        code = r24patch.assemble(src, va, info["thumb"], info["size"])
+        r24patch.splice(img, va, code, info["size"])
+    except r24patch.PatchError as exc:
+        _die(str(exc))
+    img.refresh_checksum()
+    try:
+        img.verify()
+    except ImageError as exc:
+        _die(f"post-assembly verification failed: {exc}")
+    img.write(args.output)
+    print(f"assembled {args.source} -> {va:#x} "
+          f"({'thumb' if info['thumb'] else 'arm'}, {len(code)}/{info['size']} bytes)")
+    print(f"wrote {args.output} ({img.size} bytes, checksum {img.stored_checksum:#010x})")
+    return 0
+
+
+def cmd_decompile(args) -> int:
+    """Explain how to produce decompiled C, and summarise an existing run."""
+    import csv
+    d = args.input
+    if not os.path.isdir(d):
+        _die(f"{d} is not a directory")
+    idx = os.path.join(d, "decomp_index.csv")
+    if not os.path.exists(idx):
+        _die(f"{idx} not found")
+    rows = list(csv.DictReader(open(idx)))
+    ok = [r for r in rows if r["decompiled"] == "1"]
+    thumb = sum(1 for r in ok if r["is_thumb"] == "1")
+    print(f"decompiled functions : {len(ok)}/{len(rows)}")
+    print(f"  ARM state          : {len(ok) - thumb}")
+    print(f"  Thumb state        : {thumb}")
+    print(f"  sources            : {d}/decomp/")
+    if args.grep:
+        import re
+        pat = re.compile(args.grep, re.I)
+        hits = 0
+        for r in ok:
+            fp = os.path.join(d, "decomp", r["file"])
+            try:
+                body = open(fp, encoding="utf-8", errors="replace").read()
+            except OSError:
+                continue
+            if pat.search(body):
+                print(f"\n--- {r['addr']} {r['name']} ---")
+                for line in body.splitlines():
+                    if pat.search(line):
+                        print("   " + line.strip()[:120])
+                hits += 1
+                if hits >= args.limit:
+                    break
+        print(f"\n{hits} function(s) matching {args.grep!r}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# paste  (put a WAV at a byte offset, no validation, no length fitting)
+# ---------------------------------------------------------------------------
+def cmd_paste(args) -> int:
+    import hashlib
+    import json
+
+    import r24wav
+
+    rate = args.rate
+    try:
+        offset = int(args.offset, 0)
+    except ValueError:
+        _die(f"--offset must be a number, got {args.offset!r}")
+    if offset < 0:
+        _die("--offset must be >= 0")
+
+    img = _load(args.image)
+    size = img.size
+    if offset >= size:
+        _die(f"offset {offset:#x} is past the end of the image ({size:#x})")
+
+    try:
+        pcm, info = r24wav.encode_wav_raw(args.wav, rate)
+    except r24wav.PcmError as exc:
+        _die(str(exc))
+
+    end = offset + len(pcm)
+    print(f"wav        : {args.wav}")
+    print(f"  source   : {info['source_samples']} frames @ "
+          f"{info['source_rate']} Hz, {info['source_channels']} ch")
+    print(f"  converted: mono 16-bit LE @ {rate} Hz, no header")
+    print(f"  payload  : {len(pcm)} bytes ({info['seconds']:.4f} s)")
+    print(f"offset     : {offset:#x} .. {end:#x}")
+
+    if end > size:
+        _die(f"does not fit: needs {len(pcm)} bytes at {offset:#x} but the "
+             f"image ends at {size:#x} ({size - offset} bytes available)")
+
+    img._data[offset:end] = pcm
+
+    if not args.no_checksum:
+        # The header checksum covers the whole payload; recomputing it is the
+        # only thing here that inspects the image, and skipping it would make
+        # the device reject the file.
+        img.refresh_checksum()
+        print(f"checksum   : recomputed -> {img.stored_checksum:#010x}")
+    else:
+        print("checksum   : left untouched (--no-checksum)")
+
+    img.write(args.output)
+    print(f"wrote {args.output} ({img.size} bytes)")
+
+    sidecar = os.path.join(os.path.dirname(os.path.abspath(args.output)),
+                           "paste.json")
+    with open(sidecar, "w") as fh:
+        json.dump({
+            "operation": "paste",
+            "source_image": os.path.relpath(args.image),
+            "output": os.path.relpath(args.output),
+            "wav": os.path.relpath(args.wav),
+            "offset": f"{offset:#x}",
+            "length": len(pcm),
+            "sample_rate": rate,
+            "output_sha256": hashlib.sha256(img.data).hexdigest(),
+        }, fh, indent=2)
+        fh.write("\n")
+    print(f"wrote {sidecar}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(
+        prog="r24tool",
+        description="Zoom R24 firmware image toolchain",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    p = sub.add_parser("info", help="print header/checksum summary")
+    p.add_argument("image")
+    p.set_defaults(func=cmd_info)
+
+    p = sub.add_parser("verify", help="validate magic + checksum (exit 1 on failure)")
+    p.add_argument("image")
+    p.set_defaults(func=cmd_verify)
+
+    p = sub.add_parser("unpack", help="split an image into header.bin/payload.bin")
+    p.add_argument("image")
+    p.add_argument("-o", "--output", required=True)
+    p.set_defaults(func=cmd_unpack)
+
+    p = sub.add_parser("pack", help="reassemble payload.bin -> image (fixes checksum)")
+    p.add_argument("source")
+    p.add_argument("-o", "--output", required=True)
+    p.add_argument("--no-checksum", action="store_true",
+                   help="keep the header checksum field untouched")
+    p.set_defaults(func=cmd_pack)
+
+    p = sub.add_parser("analyze", help="architecture + code/data map")
+    p.add_argument("image")
+    p.add_argument("-v", "--verbose", action="store_true")
+    p.set_defaults(func=cmd_analyze)
+
+    p = sub.add_parser("patch", help="version bump / length-preserving byte patches")
+    p.add_argument("image")
+    p.add_argument("-o", "--output", required=True)
+    p.add_argument("--set-version")
+    p.add_argument("--patch", action="append", metavar="OFF:HEXOLD:HEXNEW")
+    p.set_defaults(func=cmd_patch)
+
+    p = sub.add_parser("build", help="build a customised image from a JSON spec")
+    p.add_argument("spec")
+    p.add_argument("-o", "--output", required=True)
+    p.add_argument("--source", default="R24SYS.BIN")
+    p.set_defaults(func=cmd_build)
+
+    p = sub.add_parser("disasm", help="disassemble a function (or list all functions)")
+    p.add_argument("image")
+    p.add_argument("-a", "--address", help="function entry VA, e.g. 0x02080840")
+    p.add_argument("-s", "--size", type=lambda s: int(s, 0),
+                   help="byte size (overrides the function map)")
+    p.add_argument("--fnmap", default="tools/data/functions.csv",
+                   help="Ghidra functions.csv (default: tools/data/functions.csv)")
+    p.add_argument("--arm", dest="thumb", action="store_false", default=True,
+                   help="treat as ARM state instead of Thumb")
+    p.add_argument("-o", "--output", help="write assembly here instead of stdout")
+    p.set_defaults(func=cmd_disasm)
+
+    p = sub.add_parser("asm", help="assemble an edited function back into an image")
+    p.add_argument("image")
+    p.add_argument("source", help="assembly file to assemble")
+    p.add_argument("-a", "--address", required=True, help="function entry VA")
+    p.add_argument("-s", "--size", type=lambda s: int(s, 0),
+                   help="byte size (overrides the function map)")
+    p.add_argument("--fnmap", default="tools/data/functions.csv")
+    p.add_argument("--arm", dest="thumb", action="store_false", default=True)
+    p.add_argument("-o", "--output", required=True)
+    p.set_defaults(func=cmd_asm)
+
+    p = sub.add_parser("decompile", help="summarise/search a Ghidra decompile run")
+    p.add_argument("input", help="directory produced by R24Decompile.java")
+    p.add_argument("--grep", help="show functions whose C matches this regex")
+    p.add_argument("--limit", type=int, default=5, help="max functions to show")
+    p.set_defaults(func=cmd_decompile)
+
+    p = sub.add_parser(
+        "paste",
+        help="write a WAV at a byte offset (mono 16-bit LE, no validation)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""examples:
+  ./r24tool paste R24SYS.BIN --offset 0x231c80 \\
+      --wav "REVERB_X0X/606/Kick1.wav" -o build/raw.bin
+
+The WAV is folded to mono, resampled to --rate (default 44100) and written as
+bare 16-bit little-endian samples with no header. Nothing is detected, trimmed
+or padded: the bytes go exactly where --offset says, and only the file bounds
+are enforced. The header checksum IS recomputed, because without it the device
+rejects the file; pass --no-checksum to skip even that.""")
+    p.add_argument("image")
+    p.add_argument("--offset", required=True, metavar="BYTES",
+                   help="where to write, in file bytes (accepts 0x.. and ..)")
+    p.add_argument("--wav", required=True, metavar="FILE",
+                   help="WAV to convert and insert")
+    p.add_argument("-o", "--output", required=True, help="output image")
+    p.add_argument("--rate", type=int, default=44100,
+                   help="target sample rate in Hz (default 44100)")
+    p.add_argument("--no-checksum", action="store_true",
+                   help="do not recompute the header checksum")
+    p.set_defaults(func=cmd_paste)
+
+    args = ap.parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

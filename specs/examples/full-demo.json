@@ -1,0 +1,20 @@
+{
+  "_comment": "Reference example exercising every part of the pipeline: both version fields, a fixed-offset patch, and a pattern-located patch. Every replacement is byte-length-identical - mandatory, because these strings are referenced from literal pools and moving them would invalidate every pointer into the table.",
+  "output_name": "R24SYS.BIN",
+  "version": "1.99",
+  "ui_version": "1.99",
+  "patches": [
+    {
+      "_note": "MONO-%03d.WAV -> TAKE-%03d.WAV (fixed offset; mono take template)",
+      "offset": "0x5d1c",
+      "expected": "4d4f4e4f2d253033642e574156",
+      "replacement": "54414b452d253033642e574156"
+    },
+    {
+      "_note": "STE-%03d.WAV -> STE_%03d.WAV (located by pattern; stereo take template)",
+      "find": "5354452d253033642e574156",
+      "expected": "5354452d253033642e574156",
+      "replacement": "5354455f253033642e574156"
+    }
+  ]
+}

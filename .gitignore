@@ -1,0 +1,29 @@
+# Zoom's own material: stock firmware, built images (they contain it),
+# decompiled code, manuals, other models' firmware
+*.BIN
+*.bin
+*.zip
+*.pdf
+decomp/
+build/
+build-*/
+REVERB_X0X/
+
+# device dumps (device-specific, > 100 MB)
+DUMP/
+DUMP1/
+DUMP2/
+
+# recordings and sample kits (rights unknown)
+*.WAV
+*.wav
+*.aup3
+drumkit-basic/
+drumkit-studio/
+
+# local / tooling
+__pycache__/
+*.pyc
+.reasonix/
+test/to_test/
+.claude/

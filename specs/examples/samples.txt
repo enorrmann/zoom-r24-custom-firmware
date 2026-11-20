@@ -1,0 +1,35 @@
+# Example patch list for tools/patch_samples.py
+#
+# Format:  <wav path>   <sample id>
+#
+#   * one entry per line, two columns, whitespace-separated
+#   * column 1: path to a WAV; relative paths resolve against the repo root
+#   * column 2: sample position 0..72 (see docs/09_sample_map.md)
+#   * blank lines and lines starting with '#' are ignored
+#   * a sample id may appear only once
+#
+# Each write is capped to the sample's own slot: the WAV is truncated (with a
+# fade) if too long, zero-padded if too short, and never reaches into the
+# neighbouring sample.
+
+# ── TR-606 dedicated ids 0..12 ──────────────────────────────────────────────
+REVERB_X0X/606/Kick1.wav              0
+REVERB_X0X/606/Snare2.wav             1
+REVERB_X0X/606/Hat Closed1.wav        2
+REVERB_X0X/606/Hat Open1.wav          3
+REVERB_X0X/606/Crash1.wav             4
+REVERB_X0X/606/Hat Accent1.wav        5
+REVERB_X0X/606/Tom Hi1.wav            6
+REVERB_X0X/606/Tom Low1.wav           7
+
+# ── TR-808 ids 13..25 ───────────────────────────────────────────────────────
+REVERB_X0X/808/kick.wav              13
+REVERB_X0X/808/snare.wav             14
+REVERB_X0X/808/hi hat.wav            15
+REVERB_X0X/808/hi hat (2).wav        16
+
+# ── TR-909 ids 26..38 ───────────────────────────────────────────────────────
+REVERB_X0X/909/BT0A0D0.WAV           26
+REVERB_X0X/909/ST0T0S0.WAV           27
+REVERB_X0X/909/HHCD0.WAV             28
+REVERB_X0X/909/HHOD0.WAV             29

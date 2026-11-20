@@ -1,0 +1,7 @@
+./tools/r24tool paste R24SYS.BIN --offset 2425358 --wav REVERB_X0X/606/Snare3.wav -o test/R24SYS.BIN
+
+// el primer sample tiene offset 2228300
+./tools/r24tool paste R24SYS.BIN --wav REVERB_X0X/606/Snare3.wav -o test/R24SYS.BIN --offset 2228300
+
+
+dd if=R24SYS.BIN of=only_samples.bin bs=4M skip=2228300 iflag=skip_bytes

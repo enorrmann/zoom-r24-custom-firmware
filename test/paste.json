@@ -1,0 +1,10 @@
+{
+  "operation": "paste",
+  "source_image": "R24SYS.BIN",
+  "output": "test/R24SYS.BIN",
+  "wav": "REVERB_X0X/606/Snare3.wav",
+  "offset": "0x22004c",
+  "length": 12162,
+  "sample_rate": 44100,
+  "output_sha256": "4feb9029b2ba3dff6bce2934c3e1a2e657d73630305f4c4809b6a8b638c8721d"
+}
