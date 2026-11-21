@@ -1,17 +1,19 @@
 /*
- * usb_midi.c — SYSTEM > USB MIDI (Off/On): the R24 becomes a USB host for a
- * class-compliant USB-MIDI interface (e.g. a USB -> DIN5 cable, CH345
- * 1a86:752d) and sends it MIDI clock (24 PPQN) and Start/Continue/Stop,
- * locked to the recorder transport. Cable 0 (the first DIN OUT).
+ * usb_midi.c — SYSTEM > MIDI SYNC (Off/Out/In): the R24 becomes a USB host
+ * for a class-compliant USB-MIDI interface (e.g. a USB -> DIN5 cable, CH345
+ * 1a86:752d). Out: it sends MIDI clock (24 PPQN) and Start/Continue/Stop,
+ * locked to the recorder transport, on cable 0 (the first DIN OUT). In: it
+ * follows Start/Continue/Stop arriving on the DIN IN (PLAY/STOP, recording
+ * if REC is armed).
  * docs/22_usb_midi.md.
  *
  * Pieces (all RAM addresses, see the doc for the evidence):
  *
- *   setting    um_on, a variable of this patch: Off at every power-on (the
+ *   setting    um_on (Off / Out / In), a variable of this patch: Off at every power-on (the
  *              user's choice, like SYNC REC), never saved. Changing it does
  *              not mark the system settings dirty, so no NOR write.
  *   menu       SYSTEM header 0x800D4AE4 (count 8, item array at +0x20):
- *              11 items: USB MIDI (Off/On), MIDI OFFSET (0..50 ms: the
+ *              11 items: MIDI SYNC (Off/Out/In), MIDI OFFSET (0..50 ms: the
  *              clock leaves that much early, to cancel the receiver's
  *              latency) and MIDI CALIBRATE (measures it on a mono take of
  *              the synth recorded from 00:00: the silence before the first
@@ -50,6 +52,9 @@
  *              puts this code in RAM, and after the settings load):
  *              creates the task, which waits 3 s and then follows the
  *              setting.
+ *
+ * MIDI SYNC = In: the task reads the bulk IN pipe instead and turns Start /
+ * Continue / Stop into the R24's PLAY / STOP keys (see "MIDI SYNC = In").
  *
  * SYNC REC (Master/Slave) uses the USB port itself: while it is not Off the
  * task leaves the port alone.
@@ -99,9 +104,13 @@ R24_CHECK(0x800D4AC4, "30480d8080480d80d0480d8020490d80cc490d80"
 R24_CHECK(0x800D4A24, "f99c1e8000000000020000001c4a0d80000000000000000001000000"
                       "0c6e4c80000000000000000001000000579b0180");  /* BATTERY */
 
-static const char *const um_values[2] = { "Off", "On" };
+static const char *const um_values[3] = { "Off", "Out", "In" };
 
-volatile uint32_t um_on;            /* 0 Off, 1 On: Off at power-on, not saved */
+/* 0 Off, 1 Out (the R24 is the clock master), 2 In (the R24 follows
+ * Start/Continue/Stop from the cable's DIN IN). Off at power-on, not saved. */
+volatile uint32_t um_on;
+#define UM_OUT 1
+#define UM_IN  2
 volatile uint32_t um_offset;        /* 0..50 ms: clocks leave this early; 0 at power-on */
 /* Timing: the hardware timer, waiting for each clock's exact moment (was
  * the option MIDI TIMING = EXACT). The other option, following the whole-ms
@@ -125,7 +134,7 @@ __attribute__((used)) void um_changed(void)
 }
 
 struct menu_item um_item = {
-    "USB MIDI", 0, 2, um_values, 0, 0, 1, &um_on, 0, 0, 1,
+    "MIDI SYNC", 0, 3, um_values, 0, 0, 1, &um_on, 0, 0, 2,
     (const void *)um_changed,
     { (const void *)0x801E9C81, (const void *)0x801E9C81,
       (const void *)0x801E9C81, (const void *)0x801E9C81 }, 0, 0, 0, 0
@@ -168,6 +177,7 @@ struct usbh_driver {                /* 16 bytes, as the MSC driver 0x801ED5F8 */
 
 volatile void *um_iface;            /* claimed MIDIStreaming interface */
 volatile void *um_pipe;             /* its bulk OUT pipe */
+volatile void *um_pipe_in;          /* its bulk IN pipe (MIDI SYNC = In) */
 volatile uint32_t um_attaches, um_detaches;
 
 __attribute__((used)) int um_attach(void *ifc)
@@ -175,6 +185,7 @@ __attribute__((used)) int um_attach(void *ifc)
     if (!ifc || IFC_SUBCLASS(ifc) != 3 || um_iface)
         return -1;                  /* AudioControl etc.: not ours */
     um_pipe = 0;
+    um_pipe_in = 0;
     um_iface = ifc;
     um_attaches++;
     return 0;                       /* claimed */
@@ -185,6 +196,7 @@ __attribute__((used)) int um_detach(void *ifc)
     if (ifc == um_iface) {
         um_iface = 0;
         um_pipe = 0;                /* freed by the stack with the device */
+        um_pipe_in = 0;
         um_detaches++;
     }
     return 0;
@@ -691,7 +703,7 @@ static int um_take(void)
 
 __attribute__((used)) void um_on_start(void)
 {
-    if (um_on != 1 || SYNC_REC != 0 || !um_pipe || !um_iface)
+    if (um_on != UM_OUT || SYNC_REC != 0 || !um_pipe || !um_iface)
         return;
     if (!um_take()) {
         um_kick = 1;                            /* the task will do it at once */
@@ -725,6 +737,201 @@ __attribute__((naked)) void um_det_start(void)
 }
 R24_REPLACE(0x80059A3C, "0843bf4948600020", um_det_start);
 
+/* ── MIDI SYNC = In: follow Start / Continue / Stop ───────────────────────
+ * The task reads the bulk IN pipe (the cable's DIN IN) and turns the
+ * transport messages into the R24's own key presses, posted to the UI event
+ * queue (0x80003C00 -> data queue [0x801EA9E0], the one fw_wait_event reads):
+ * the main screen's handler (0x800093EA) does exactly what the keys do, so
+ * PLAY in REC standby starts recording (REC 0x10034 -> 0x800203C2, PLAY
+ * 0x10033 -> 0x8002042E, STOP 0x10032 -> 0x8001FA00).
+ *   Start  FA  locate to MIDI OFFSET ms (normally 0), PLAY. If the R24 is
+ *              playing, STOP first.
+ *   Cont.  FB  PLAY from where it is, or from the last Song Position (F2,
+ *              16ths at the project tempo) received while stopped.
+ *   Stop   FC  STOP (only if playing).
+ *   Clock  F8  the project tempo follows it (see "tempo from the incoming
+ *              clock").
+ * Locate = 0x8001F8C0(ms, 0), as the key handler's return to zero
+ * (0x8000957E); it takes the locate mutex 0x801EB5B2 itself.
+ * MIDI OFFSET in this mode: the R24 starts some ms after the Start arrives
+ * (USB, the UI task, REC's own 16 ms pre-delay), so what the sequencer
+ * played at its Start is never recorded and the take lands that much early.
+ * Starting at OFFSET ms instead of 00:00 compensates: OFFSET = that latency
+ * puts sequencer time t at R24 position t. */
+#define fw_ui_post(ev)        FW(0x80003C00, int, int)(ev)
+#define fw_locate(ms, f)      FW(0x8001F8C0, int, int, int)(ms, f)
+#define EV_STOP 0x00010032
+#define EV_PLAY 0x00010033
+
+/* ── tempo from the incoming clock ────────────────────────────────────────
+ * The project tempo (BPM x 10) is 0x804C44C0 + 0x20; the TEMPO edit of the
+ * main screen (0x800093A8) stores it there and calls 0x80004FEA(t):
+ * 0x8002B738 clamps to 400..2500 and sets the rhythm engine's 0x801EB744,
+ * then 0x800205E8 sets the counter 0x801EB5A4 = 100. Nothing task-bound.
+ * Measure: the hardware timer (64 * fs per second) at each F8, a window of
+ * UM_TW clocks (4 beats). USB delivers within ~1 ms, so 4 beats (2 s at 120)
+ * give about +-0.05 BPM; the measure is kept in BPM x 100 and a new tempo
+ * is applied only when it differs from the project's by more than
+ * UM_THYST (0.07 BPM) for UM_HOLD_STOP clocks (stopped) / UM_HOLD_PLAY
+ * (playing: a tempo change mid-song can move the drum pattern's bar/beat).
+ * Whole 0.1 BPM is all the R24 keeps: 120.04 on the sequencer stays 120.0
+ * here and drifts ~0.7 ms per bar; the phase is not locked, only the tempo. */
+#define PRJ_TEMPO     (*(volatile int32_t *)(0x804C44C0 + 0x20))
+#define fw_set_tempo(t)       FW(0x80004FEA, int, int)(t)
+#define UM_TW         96                        /* clocks in the window = 4 beats */
+#define UM_THYST      7                         /* BPM x 100 */
+#define UM_HOLD_STOP  24
+#define UM_HOLD_PLAY  48
+
+static uint32_t um_ck[UM_TW + 1];               /* timer at the last UM_TW + 1 clocks */
+static int um_ckn, um_ckw;
+static int32_t um_cand, um_hold;
+volatile int32_t um_in_bpm100;                  /* measured, BPM x 100 (0 = not yet) */
+volatile uint32_t um_in_clocks, um_in_tempo_sets;
+
+static uint32_t um_k_now(void)
+{
+    uint32_t fs = XPORT[2];
+    return 64 * (fs ? fs : 44100);
+}
+
+/* one F8 at timer value t */
+__attribute__((noinline, used)) void um_in_clock(uint32_t t)
+{
+    uint32_t k = um_k_now(), span;
+    int32_t m, cur, d, hold;
+
+    um_in_clocks++;
+    if (um_ckn && t - um_ck[(um_ckw + UM_TW) % (UM_TW + 1)] > k / 2)
+        um_ckn = 0;                             /* > 0.5 s without clock: start over */
+    um_ck[um_ckw] = t;
+    um_ckw = (um_ckw + 1) % (UM_TW + 1);
+    if (um_ckn < UM_TW + 1)
+        um_ckn++;
+    if (um_ckn < UM_TW + 1) {
+        um_in_bpm100 = 0;
+        um_hold = 0;
+        return;
+    }
+    span = t - um_ck[um_ckw];                   /* the oldest: UM_TW clocks ago */
+    if (!span)
+        return;
+    /* UM_TW clocks = UM_TW/24 beats: BPM = 60 * k * (UM_TW / 24) / span */
+    m = (int32_t)(((uint64_t)6000 * k * (UM_TW / 24) + span / 2) / span);
+    um_in_bpm100 = m;
+    if (m < 4000 || m > 25000)
+        return;                                 /* outside 40.0..250.0 */
+    cur = PRJ_TEMPO;
+    d = m - cur * 10;
+    if (d <= UM_THYST && d >= -UM_THYST) {
+        um_hold = 0;
+        return;
+    }
+    m = (m + 5) / 10;                           /* BPM x 10 */
+    if (m != um_cand) {
+        um_cand = m;
+        um_hold = 0;
+    }
+    hold = XPORT_PLAYING ? UM_HOLD_PLAY : UM_HOLD_STOP;
+    if (++um_hold < hold)
+        return;
+    um_hold = 0;
+    PRJ_TEMPO = m;
+    fw_set_tempo(m);
+    um_in_tempo_sets++;
+}
+
+static uint8_t um_inbuf[64] __attribute__((aligned(32)));
+static int32_t um_spp = -1;                     /* Song Position (16ths) to continue from */
+volatile uint32_t um_in_pkts, um_in_starts, um_in_conts, um_in_stops, um_in_errors;
+volatile uint32_t um_in_last_status;
+
+static void um_wait_stopped(void)
+{
+    int i;
+    for (i = 0; i < 100 && XPORT_PLAYING; i++)  /* at most 1 s */
+        fw_delay(10);
+}
+
+__attribute__((noinline, used)) void um_in_byte(uint8_t b, uint8_t d1, uint8_t d2)
+{
+    int32_t tempo = TEMPO10;
+
+    switch (b) {
+    case 0xFA:                                  /* Start */
+        um_in_starts++;
+        um_spp = -1;
+        if (XPORT_PLAYING) {
+            fw_ui_post(EV_STOP);
+            um_wait_stopped();
+        }
+        fw_locate((int)um_offset, 0);
+        fw_ui_post(EV_PLAY);
+        break;
+    case 0xFB:                                  /* Continue */
+        um_in_conts++;
+        if (XPORT_PLAYING)
+            break;
+        if (um_spp >= 0 && tempo > 0)           /* 16th = 150000 / tempo10 ms */
+            fw_locate((int)((int64_t)um_spp * 150000 / tempo) + (int)um_offset, 0);
+        um_spp = -1;
+        fw_ui_post(EV_PLAY);
+        break;
+    case 0xFC:                                  /* Stop */
+        um_in_stops++;
+        if (XPORT_PLAYING)
+            fw_ui_post(EV_STOP);
+        break;
+    case 0xF2:                                  /* Song Position */
+        if (!XPORT_PLAYING)
+            um_spp = (int32_t)(d1 & 0x7F) | (int32_t)(d2 & 0x7F) << 7;
+        break;
+    }
+}
+
+/* USB-MIDI event packets: [cable<<4 | CIN, b0, b1, b2]; t = timer at arrival */
+__attribute__((noinline, used)) void um_in_parse(const uint8_t *p, int n, uint32_t t)
+{
+    for (; n >= 4; p += 4, n -= 4) {
+        uint8_t cin = p[0] & 0x0F;
+        if (!p[0] && !p[1])
+            continue;                           /* padding */
+        um_in_pkts++;
+        if (cin == 0x0F && p[1] == 0xF8)
+            um_in_clock(t);
+        else if (cin == 0x0F || cin == 0x05 || cin == 0x03 || cin == 0x02)
+            um_in_byte(p[1], p[2], p[3]);
+    }
+}
+
+/* one read; blocks up to 100 ms (the host stack's transfer timeout) */
+static void um_in_read(void)
+{
+    uint32_t res[2] = { 0, 0 };
+    uint32_t t0 = fw_timer();
+    int rc;
+
+    fw_dcache_flush(um_inbuf, sizeof um_inbuf);
+    rc = fw_xfer((void *)um_pipe_in, um_inbuf, sizeof um_inbuf, res, 100, 0x2000);
+    um_in_last_status = rc ? (uint32_t)rc : res[0];
+    if (!um_in_last_status && res[1]) {
+        fw_dcache_inv(um_inbuf, sizeof um_inbuf);
+        um_in_parse(um_inbuf, res[1] > sizeof um_inbuf ? (int)sizeof um_inbuf : (int)res[1],
+                    fw_timer());
+        return;
+    }
+    if (um_in_last_status)
+        um_in_errors++;
+    /* failed or empty and back at once (no timeout wait): never busy-loop,
+     * the task would starve everything below priority 0x39. The timer runs
+     * at 64 * fs (fs from the transport, 44.1 kHz until it is known). */
+    {
+        uint32_t k = um_k_now();
+        if (fw_timer() - t0 < k / 200)          /* < 5 ms */
+            fw_delay(um_in_last_status ? 20 : 1);
+    }
+}
+
 /* ── the task ──────────────────────────────────────────────────────────── */
 volatile uint32_t um_state;         /* for dumps: 0 off, 1 wait port, 2 host, 3 pipe */
 volatile int32_t um_mode_rc = 1, um_reg_rc = 1, um_pipe_rc = 1;
@@ -735,6 +942,7 @@ static void um_reset_link(void)
     um_registered = 0;
     um_iface = 0;
     um_pipe = 0;
+    um_pipe_in = 0;
 }
 
 /* The task wakes once per OS tick; a clock due before the next wake is
@@ -789,7 +997,7 @@ __attribute__((noinline, used)) void um_task(void)
 
     fw_delay(3000);
     for (;;) {
-        int want = um_on == 1 && SYNC_REC == 0;
+        int want = um_on != 0 && SYNC_REC == 0;
 
         if (!want) {
             if (um_playing) {
@@ -830,6 +1038,28 @@ __attribute__((noinline, used)) void um_task(void)
             um_registered = 1;
         }
         um_state = 2;
+
+        if (um_on == UM_IN) {
+            if (um_playing) {                   /* switched from Out */
+                um_n = 0;
+                um_playing = 0;
+            }
+            if (um_iface && !um_pipe_in) {
+                void *p = 0;
+                um_pipe_rc = fw_open_pipe((void *)um_iface, 0, 0x80 /* IN */, 2 /* bulk */, 0, 0, &p);
+                if (um_pipe_rc == 0 && p)
+                    um_pipe_in = p;
+                else
+                    fw_delay(200);
+            }
+            if (um_pipe_in) {
+                um_state = 3;
+                um_in_read();                   /* blocks until data or 100 ms */
+            } else {
+                fw_delay(10);
+            }
+            continue;
+        }
 
         if (um_iface && !um_pipe) {
             void *p = 0;

@@ -1,15 +1,20 @@
-# 22 — SYSTEM > USB MIDI: clock and start/stop to a USB-MIDI cable
+# 22 — SYSTEM > MIDI SYNC: clock and start/stop over a USB-MIDI cable
 
 > Added 2026-11-20. SDK patch `sdk/patches/usb_midi.c`, in the default image
 > (`tools/build_firmware.py`). Proven in the emulator
-> (`tools/test_usb_midi.py`). **Not yet tested on a device.** The first device
+> (`tools/test_usb_midi.py`). **Out works on a device** (CH345, 2026-11-20/21:
+> synth L − R 17.5 ms, std 0.34 ms with image `7d9c0cd4…`, kept as
+> `build/sync_out/R24SYS.BIN`; set MIDI OFFSET ≈ 17–18 ms for that synth).
+> **In** (added 2026-11-21) is not yet tested on a device. The first device
 > build (sha256 `a73e5bfa…`) did not boot; see Boot below.
 
 ## Use
 
 Connect a class-compliant USB-MIDI interface to the R24's USB port (an OTG
 adapter, mini-B → A female), e.g. a USB → DIN5 cable. Then **SYSTEM >
-USB MIDI = On**. About one second later the port switches to host mode, the
+MIDI SYNC = Out** (the R24 is the clock master) or **In** (the R24 follows
+Start/Stop from the cable's DIN IN, see "MIDI SYNC = In" below). Below,
+"USB MIDI On" means MIDI SYNC = Out. About one second later the port switches to host mode, the
 one SYNC REC Master uses (it does not touch the SD card). When the recorder
 plays, the R24 sends on cable 0 (the cable's DIN OUT):
 
@@ -21,7 +26,7 @@ plays, the R24 sends on cable 0 (the cable's DIN OUT):
 | FWD / REW / locate while playing | Stop `FC`, then Start (back at 00:00) or Song Position + Continue |
 | STOP | Stop `FC` |
 
-USB MIDI is **Off at every power-on** (like SYNC REC) and is never saved:
+MIDI SYNC is **Off at every power-on** (like SYNC REC) and is never saved:
 turn it On in SYSTEM each session. It sends nothing while stopped.
 
 **SYSTEM > MIDI OFFSET** (0–50 ms, 0 at power-on, not saved): every clock
@@ -60,8 +65,10 @@ offset 0) it measured worse, and was removed:
 | synth quarter notes | 498.7–501.5 ms | **499.4–500.5 ms** |
 
 With that synth, MIDI OFFSET ≈ 17 ms puts it on the R24's pattern. An
-earlier take (first working build, the same synth) measured 4.97 ms; the
-~12 ms difference is under investigation (`build/v1/R24SYS.BIN`).
+earlier take (first working build, the same synth) measured 4.97 ms. The
+~12 ms difference is the setup, not the code: the same first build
+(`build/v1/R24SYS.BIN`), re-tested with the current setup (2026-11-21),
+measured 19.30 ms (std 0.80) against 17.54 ms (std 0.34) for the timer build.
 
 **SYSTEM > MIDI CALIBRATE** measures the latency on a take:
 
@@ -105,6 +112,76 @@ playing (FWD/REW, even one never seen as a stop) restarts the clock.
 * Tested adapter descriptor: QinHeng **CH345** `1a86:752d`, full speed,
   Audio/MIDIStreaming, bulk OUT `0x02`, 32 bytes. Any interface with
   bInterfaceClass 1 / subclass 3 (MIDIStreaming) is taken.
+
+## MIDI SYNC = In: follow Start / Stop (2026-11-21)
+
+The R24 reads the cable's DIN IN (the interface's bulk IN pipe) and turns the
+transport messages into its own key presses. It sends nothing back.
+
+| message | the R24 does |
+|---|---|
+| Start `FA` | locate to MIDI OFFSET ms (normally 00:00), then PLAY. If playing: STOP first |
+| Continue `FB` | PLAY from where it is, or from the last Song Position `F2` received while stopped (16ths at the project tempo) |
+| Stop `FC` | STOP, only if playing (a Stop while stopped does not cancel REC standby) |
+| Clock `F8` | the **project tempo follows it** (below) |
+| notes, other messages | ignored |
+
+**Tempo from the clock.** The patch times each `F8` with the hardware
+timer (64 × fs per second) over a window of 96 clocks (4 beats). USB
+delivers within ~1 ms, so that gives about ±0.05 BPM. It keeps the measure in
+BPM × 100. It sets a new project tempo only when the measure differs from the
+current one by more than 0.07 BPM, steadily, for 24 clocks while stopped or
+48 clocks (2 beats) while playing. It sets the tempo the way the TEMPO edit
+of the main screen does (`0x800093A8`): the project word
+`0x804C44C0 + 0x20` (BPM × 10), then `0x80004FEA(t)` → `0x8002B738`
+(clamp 40.0–250.0, rhythm engine `0x801EB744`) and `0x800205E8`.
+After 0.5 s without clocks, the window starts over.
+
+* Only the **tempo** follows, not the phase. The R24 runs on its own audio
+  clock. It keeps whole 0.1 BPM, so 120.04 on the sequencer stays 120.0 here
+  and drifts ~0.7 ms per bar. Use tempos with one decimal on the sequencer.
+* The first 4 beats after the clock appears play at the old tempo. If the
+  sequencer sends clock while stopped, the tempo is already right at Start.
+* A tempo change while playing can move the drum pattern's bar/beat (the
+  counter converts ms with the current tempo, `0x8002D4EC`). The recorded
+  audio does not depend on the tempo.
+* It changes the project's tempo, the word the TEMPO edit changes. That it is
+  saved with the project like a manual edit is assumed, not checked.
+
+**Synced recording:** arm the tracks and press REC (REC standby, as for a
+normal take). The sequencer's Start presses PLAY, which starts recording, and
+its Stop ends the take. This is what the keys do, because the press goes
+through the same handler.
+
+**Latency / MIDI OFFSET in this mode.** The R24 starts some ms after the
+Start arrives: USB, the UI task, and REC's own 16 ms pre-delay. What the
+sequencer plays during that time is missed, and the take lands that much
+early. With MIDI OFFSET = that latency, Start locates to OFFSET ms instead of
+00:00, so sequencer time t lands at R24 position t. Not measured yet.
+
+The presses are posted to the UI event queue, as the keyboard posts them, so
+they act on the screen that is open. From the main recorder screen they do
+what the keys do there.
+
+| what | where |
+|---|---|
+| UI event queue | data queue id at `0x801EA9E0`; post `0x80003C00(ev)` (blocking send `0x800531DC`); read by `fw_wait_event` `0x800033E0` |
+| key events (press = `0x1xxxx`) | main screen handler `0x800093EA`: STOP `0x10032` → `0x8001FA00`, PLAY `0x10033` → `0x8002042E` (→ `0x8001F7A0`, under the transport mutex `0x801EB5B0`), REC `0x10034` → `0x800203C2` (→ `0x8001F812`), REW `0x10030`, FF `0x10031`. The SYNC REC Master screen loop (`0x800233DA`) uses the same codes and forwards each to the slave (`0x8005B43E`: 1 play, 2 stop, 3 rec, 4 locate) |
+| locate | `0x8001F8C0(ms, 0)`, as the return to zero at `0x8000957E`; takes the locate mutex `0x801EB5B2` |
+| bulk IN pipe | `0x80081BAC(iface, 0, 0x80, 2, 0, 0, &pipe)`, as SYNC REC (`0x8005B758`) and MSC (`0x8007A51E`) |
+| read | sync `0x800819D6(pipe, buf, 64, res, 100 ms, 0x2000)`. Flags `0x2000` are what MSC's data-in uses (`0x8007C784`: a short packet ends the transfer). The sync call waits on a semaphore of its own (`0x8008129E` / `0x8008139C`), so only the calling task blocks, not the USBD task |
+
+The patch task does the reads itself in this mode. It blocks until data
+arrives or 100 ms pass. If a read comes back empty or failed in under 5 ms, it
+sleeps 1 ms (20 ms after an error), so it never busy-loops at priority 0x39.
+
+Debug variables: `um_pipe_in`, `um_in_pkts`, `um_in_starts`,
+`um_in_conts`, `um_in_stops`, `um_in_errors`, `um_in_last_status`,
+`um_in_clocks`, `um_in_bpm100` (measured, BPM × 100), `um_in_tempo_sets`.
+
+**Not proven on a device:** the transfer timeout on a NAKing bulk IN (with
+no timeout the read just waits for data, which is fine), the CH345's IN
+endpoint, and how much latency PLAY-from-a-posted-key adds.
 
 ## How (RAM addresses)
 

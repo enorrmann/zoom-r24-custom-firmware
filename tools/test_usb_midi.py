@@ -180,9 +180,11 @@ def main() -> int:
                            0x800D49CC, 0x800D4A24, 0x800D4970, 0x800D4A74],
        "the 8 stock items keep their order")
     it = struct.unpack("<20I", e.read(items[8], 80))
-    ok(e.cstring(it[0]) == "USB MIDI", "item label")
-    ok(it[1:3] == (0, 2) and it[7] == UM_SETTING and it[10] == 1,
-       "list item: 2 values, the patch's own variable um_on, max 1")
+    ok(e.cstring(it[0]) == "MIDI SYNC", "item label")
+    ok(it[1:3] == (0, 3) and it[7] == UM_SETTING and it[10] == 2,
+       "list item: 3 values, the patch's own variable um_on, max 2")
+    ok([e.cstring(x) for x in struct.unpack("<3I", e.read(it[3], 12))] == ["Off", "Out", "In"],
+       "values Off / Out / In")
     ok(it[11] == SYM["um_changed"] | 1, "change callback of its own (does not mark the settings dirty)")
     ok(e.u32(UM_SETTING) == 0, "Off at power-on (initial value, not loaded from the settings)")
     ofs = struct.unpack("<20I", e.read(items[9], 80))
@@ -199,7 +201,6 @@ def main() -> int:
     w32(e, 0x801EB418, 0)
     e.call(SYM["um_changed"])
     ok(e.u32(0x801EB418) == 0, "changing it leaves the settings-dirty flag alone (no NOR write)")
-    ok([e.cstring(e.u32(it[3] + 4 * i)) for i in range(2)] == ["Off", "On"], "values Off/On")
     batt = struct.unpack("<20I", e.read(0x800D4A24, 80))
     ok(it[4:7] == batt[4:7] and it[8:10] == batt[8:10] and it[12:] == batt[12:],
        "other item words as BATTERY")
@@ -524,6 +525,9 @@ def main() -> int:
     e, usb, log, delays, _ = task_emu(1, 0, max_delays=30, sync_at=20)
     ok(("off",) not in log and e.u32(SYM["um_own"]) == 0, "SYNC REC Master takes over: port left on")
 
+    # ── MIDI SYNC = In ──
+    midi_in_checks(task_emu)
+
     # ── boot ──
     e = r24emu.R24Emu(BUILT)
     made = []
@@ -541,6 +545,143 @@ def main() -> int:
 
     print(f"OK: {checks} checks")
     return 0
+
+
+# ── MIDI SYNC = In: Start / Continue / Stop -> the R24's keys ──
+UI_POST, LOCATE = 0x80003C00, 0x8001F8C0
+EV_STOP, EV_PLAY = 0x10032, 0x10033
+
+
+def in_emu(playing=False, offset=0, tempo=1200):
+    e = r24emu.R24Emu(BUILT)
+    acts = []
+    transport(e, playing, tempo=tempo)
+    w32(e, SYM["um_offset"], offset)
+
+    def post(e, r):
+        acts.append(("key", r[0]))
+        if r[0] == EV_STOP:
+            w32(e, XPORT + 4, 0)          # the UI stops the transport
+        return 0
+    e.stub(UI_POST, post)
+    e.stub(LOCATE, lambda e, r: acts.append(("locate", r[0], r[1])) or 0)
+    e.stub(DELAY, lambda e, r: acts.append(("delay", r[0])) or 0)
+    return e, acts
+
+
+def feed(e, data, t=0):
+    buf = e.alloc(data)
+    e.call(SYM["um_in_parse"], buf, len(data), t & 0xFFFFFFFF)
+
+
+SET_TEMPO, PRJ_TEMPO = 0x80004FEA, 0x804C44C0 + 0x20
+
+
+def tempo_run(bpm, n, prj=1200, playing=False, jitter_ms=0.0, t0=0x10000000, seed=1):
+    """n clocks at `bpm` (timer 64*44100/s, optional +-jitter at arrival);
+    -> (tempo sets, measured BPM x 100)"""
+    import random
+    rnd = random.Random(seed)
+    e, acts = in_emu(playing=playing)
+    w32(e, PRJ_TEMPO, prj)
+    sets = []
+    e.stub(SET_TEMPO, lambda e, r: sets.append((r[0], e.u32(PRJ_TEMPO), clk[0])) or 0)
+    k = 64 * 44100
+    per = k * 60 / bpm / 24
+    clk = [0]
+    for i in range(n):
+        clk[0] = i + 1
+        t = t0 + i * per + rnd.uniform(-jitter_ms, jitter_ms) * k / 1000
+        feed(e, F8, int(t))
+    return sets, e.u32(SYM["um_in_bpm100"])
+
+
+def midi_in_checks(task_emu):
+    e, acts = in_emu()
+    feed(e, FA)
+    ok(acts == [("locate", 0, 0), ("key", EV_PLAY)], "Start: locate 00:00, PLAY key")
+    e, acts = in_emu(offset=17)
+    feed(e, FA)
+    ok(acts == [("locate", 17, 0), ("key", EV_PLAY)], "Start: locate to MIDI OFFSET ms")
+    e, acts = in_emu(playing=True)
+    feed(e, FA)
+    ok(acts == [("key", EV_STOP), ("locate", 0, 0), ("key", EV_PLAY)], "Start while playing: STOP first")
+    e, acts = in_emu(playing=True)
+    feed(e, FC)
+    ok(acts == [("key", EV_STOP)], "Stop while playing: STOP key")
+    e, acts = in_emu()
+    feed(e, FC)
+    ok(acts == [], "Stop while stopped: nothing (does not cancel REC standby)")
+    e, acts = in_emu()
+    feed(e, FB)
+    ok(acts == [("key", EV_PLAY)], "Continue: PLAY from where it is")
+    e, acts = in_emu(playing=True)
+    feed(e, FB)
+    ok(acts == [], "Continue while playing: nothing")
+    e, acts = in_emu(tempo=1200)
+    feed(e, bytes([0x03, 0xF2, 16, 0]) + FB)          # 16 16ths = 1 bar at 120 = 2000 ms
+    ok(acts == [("locate", 2000, 0), ("key", EV_PLAY)], "Song Position + Continue: locate there, PLAY")
+    e, acts = in_emu()
+    feed(e, F8 * 6 + bytes(8) + bytes([0x09, 0x90, 60, 100]))
+    ok(acts == [] and e.u32(SYM["um_in_pkts"]) == 7, "clock, padding and notes: ignored")
+    e, acts = in_emu()
+    feed(e, F8 + bytes([0x1F, 0xFA, 0, 0]))
+    ok(acts[-1] == ("key", EV_PLAY), "any cable")
+
+    # tempo from the clock
+    sets, m = tempo_run(125.0, 96)
+    ok(sets == [] and m == 0, "tempo: nothing before a full 4-beat window")
+    sets, m = tempo_run(125.0, 97 + 30)
+    ok(m == 12500 and sets and sets[0][:2] == (1250, 1250), "tempo: 125.0 measured, project tempo set (stopped)")
+    ok(sets[0][2] == 97 + 23, "tempo: stopped -> after 24 steady clocks")
+    ok(len(sets) == 1, "tempo: set once")
+    sets, m = tempo_run(125.0, 97 + 60, playing=True)
+    ok(sets and sets[0][2] == 97 + 47, "tempo: playing -> after 48 steady clocks (2 beats)")
+    sets, m = tempo_run(120.0, 400, jitter_ms=1.0)
+    ok(sets == [], "tempo: 120.0 with +-1 ms USB jitter does not touch a 120.0 project")
+    sets, m = tempo_run(97.3, 400, jitter_ms=1.0)
+    ok(sets and sets[-1][0] == 973 and len(sets) == 1, "tempo: 97.3 with jitter -> 97.3 once")
+    sets, m = tempo_run(120.0, 400, t0=0xFFFF0000)
+    ok(sets == [] and m == 12000, "tempo: timer wrap")
+    sets, m = tempo_run(300.0, 300)
+    ok(sets == [], "tempo: outside 40..250 ignored")
+
+    # the task in In mode: IN pipe, blocking reads that feed the parser
+    reads = []
+
+    def xfer(e, r):
+        pipe, buf, n, res = r
+        sp = e.uc.reg_read(UC_ARM_REG_SP)
+        reads.append((pipe, n, e.u32(sp), e.u32(sp + 4)))
+        data = FA if len(reads) == 1 else b""
+        e.write(buf, data)
+        w32(e, res, 0)
+        w32(e, res + 4, len(data))
+        return 0
+    posted = []
+    import r24emu as _r
+    orig = _r.R24Emu.call
+
+    def hooked(self, *a, **k):                         # add the stubs before the task runs
+        if not getattr(self, "_in_stubs", False):
+            self._in_stubs = True
+            self.stub(XFER, xfer)
+            self.stub(UI_POST, lambda e, r: posted.append(r[0]) or 0)
+            self.stub(LOCATE, lambda e, r: posted.append(("locate", r[0])) or 0)
+        return orig(self, *a, **k)
+    _r.R24Emu.call = hooked
+    try:
+        e, usb, log, delays, ms_if = task_emu(2, 0, max_delays=20)
+    finally:
+        _r.R24Emu.call = orig
+    opens = [x for x in log if x[0] == "open"]
+    ok(opens and opens[0] == ("open", ms_if, 0, 0x80, 2, 0, 0), "In: bulk IN pipe of the claimed interface")
+    ok(not any(x[3] == 0 for x in opens), "In: no OUT pipe")
+    ok(e.u32(SYM["um_pipe_in"]) == 0x920A0000 and e.u32(SYM["um_state"]) == 3, "In: linked")
+    ok(reads and reads[0][1] == 64 and reads[0][2] == 100 and reads[0][3] == 0x2000,
+       "In: 64-byte reads, 100 ms timeout, short packets allowed (flags 0x2000, as MSC)")
+    ok(posted[:2] == [("locate", 0), EV_PLAY], "In: a Start read from the cable -> locate + PLAY")
+    ok(usb.xfers == 0, "In: nothing sent")
 
 
 # ── MIDI CALIBRATE: the device analysis vs the same algorithm in Python ──
